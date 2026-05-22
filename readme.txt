@@ -1,5 +1,5 @@
 === CSP Violation Reporter ===
-Contributors: csp-violation-reporter-contributors
+Contributors: Guilherme Dumas Peres
 Tags: csp, security, reporting, content-security-policy, reports
 Requires at least: 6.5
 Tested up to: 7.0
