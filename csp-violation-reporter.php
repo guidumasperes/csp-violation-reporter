@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CSP Violation Reporter
  * Description: Collects Content Security Policy violation reports through a WordPress REST endpoint and displays them in the admin dashboard.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Requires at least: 6.5
  * Requires PHP: 7.4
  * Author: Guilherme Dumas Peres
@@ -17,10 +17,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'CSPVR_VERSION', '0.1.0' );
+define( 'CSPVR_VERSION', '0.1.1' );
 define( 'CSPVR_TABLE_VERSION', '1' );
 define( 'CSPVR_REST_NAMESPACE', 'csp-violation-reporter/v1' );
 define( 'CSPVR_REST_ROUTE', '/report' );
+define( 'CSPVR_CACHE_GROUP', 'cspvr_reports' );
 
 /**
  * Returns the custom table name.
@@ -31,6 +32,31 @@ function cspvr_table_name() {
 	global $wpdb;
 
 	return $wpdb->prefix . 'cspvr_reports';
+}
+
+/**
+ * Returns the cache version for report list queries.
+ *
+ * @return string
+ */
+function cspvr_get_reports_cache_last_changed() {
+	$last_changed = wp_cache_get( 'last_changed', CSPVR_CACHE_GROUP );
+
+	if ( false === $last_changed ) {
+		$last_changed = microtime();
+		wp_cache_set( 'last_changed', $last_changed, CSPVR_CACHE_GROUP );
+	}
+
+	return (string) $last_changed;
+}
+
+/**
+ * Invalidates cached report list queries.
+ *
+ * @return void
+ */
+function cspvr_bump_reports_cache() {
+	wp_cache_set( 'last_changed', microtime(), CSPVR_CACHE_GROUP );
 }
 
 /**
@@ -169,7 +195,7 @@ function cspvr_normalize_reports( $decoded ) {
  * Stores one normalized CSP report.
  *
  * @param array<string,mixed> $report  Normalized report body.
- * @param WP_REST_Request    $request Request object.
+ * @param WP_REST_Request     $request Request object.
  * @return bool
  */
 function cspvr_store_report( array $report, WP_REST_Request $request ) {
@@ -184,34 +210,40 @@ function cspvr_store_report( array $report, WP_REST_Request $request ) {
 	$user_agent  = $request->get_header( 'user_agent' );
 
 	$data = array(
-		'created_at_gmt'       => current_time( 'mysql', true ),
-		'document_uri'         => esc_url_raw( $document_uri ),
-		'referrer'             => esc_url_raw( cspvr_get_string( $report, array( 'referrer' ) ) ),
-		'blocked_uri'          => sanitize_text_field( cspvr_get_string( $report, array( 'blocked-uri', 'blockedURL' ) ) ),
-		'violated_directive'   => sanitize_text_field( cspvr_get_string( $report, array( 'violated-directive' ) ) ),
-		'effective_directive'  => sanitize_text_field( cspvr_get_string( $report, array( 'effective-directive', 'effectiveDirective' ) ) ),
-		'original_policy'      => sanitize_textarea_field( cspvr_get_string( $report, array( 'original-policy' ) ) ),
-		'disposition'          => sanitize_key( cspvr_get_string( $report, array( 'disposition' ) ) ),
-		'status_code'          => cspvr_get_int( $report, array( 'status-code', 'statusCode' ) ),
-		'source_file'          => esc_url_raw( cspvr_get_string( $report, array( 'source-file', 'sourceFile' ) ) ),
-		'line_number'          => cspvr_get_int( $report, array( 'line-number', 'lineNumber' ) ),
-		'column_number'        => cspvr_get_int( $report, array( 'column-number', 'columnNumber' ) ),
-		'sample'               => sanitize_textarea_field( cspvr_get_string( $report, array( 'sample' ) ) ),
-		'user_agent'           => sanitize_text_field( substr( (string) $user_agent, 0, 255 ) ),
-		'remote_addr_hash'     => '' !== $remote_addr ? hash_hmac( 'sha256', $remote_addr, wp_salt( 'nonce' ) ) : '',
-		'raw_report'           => wp_json_encode( $report ),
+		'created_at_gmt'      => current_time( 'mysql', true ),
+		'document_uri'        => esc_url_raw( $document_uri ),
+		'referrer'            => esc_url_raw( cspvr_get_string( $report, array( 'referrer' ) ) ),
+		'blocked_uri'         => sanitize_text_field( cspvr_get_string( $report, array( 'blocked-uri', 'blockedURL' ) ) ),
+		'violated_directive'  => sanitize_text_field( cspvr_get_string( $report, array( 'violated-directive' ) ) ),
+		'effective_directive' => sanitize_text_field( cspvr_get_string( $report, array( 'effective-directive', 'effectiveDirective' ) ) ),
+		'original_policy'     => sanitize_textarea_field( cspvr_get_string( $report, array( 'original-policy' ) ) ),
+		'disposition'         => sanitize_key( cspvr_get_string( $report, array( 'disposition' ) ) ),
+		'status_code'         => cspvr_get_int( $report, array( 'status-code', 'statusCode' ) ),
+		'source_file'         => esc_url_raw( cspvr_get_string( $report, array( 'source-file', 'sourceFile' ) ) ),
+		'line_number'         => cspvr_get_int( $report, array( 'line-number', 'lineNumber' ) ),
+		'column_number'       => cspvr_get_int( $report, array( 'column-number', 'columnNumber' ) ),
+		'sample'              => sanitize_textarea_field( cspvr_get_string( $report, array( 'sample' ) ) ),
+		'user_agent'          => sanitize_text_field( substr( (string) $user_agent, 0, 255 ) ),
+		'remote_addr_hash'    => '' !== $remote_addr ? hash_hmac( 'sha256', $remote_addr, wp_salt( 'nonce' ) ) : '',
+		'raw_report'          => wp_json_encode( $report ),
 	);
 
 	$formats = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%d', '%d', '%s', '%s', '%s', '%s' );
 
-	return false !== $wpdb->insert( cspvr_table_name(), $data, $formats );
+	$inserted = false !== $wpdb->insert( cspvr_table_name(), $data, $formats ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Reports are stored in the plugin's custom table.
+
+	if ( $inserted ) {
+		cspvr_bump_reports_cache();
+	}
+
+	return $inserted;
 }
 
 /**
  * Reads a string value from the first matching key.
  *
  * @param array<string,mixed> $report Report body.
- * @param array<int,string>  $keys Possible keys.
+ * @param array<int,string>   $keys Possible keys.
  * @return string
  */
 function cspvr_get_string( array $report, array $keys ) {
@@ -228,7 +260,7 @@ function cspvr_get_string( array $report, array $keys ) {
  * Reads an unsigned integer from the first matching key.
  *
  * @param array<string,mixed> $report Report body.
- * @param array<int,string>  $keys Possible keys.
+ * @param array<int,string>   $keys Possible keys.
  * @return int|null
  */
 function cspvr_get_int( array $report, array $keys ) {
@@ -274,8 +306,17 @@ function cspvr_handle_admin_actions() {
 	if ( isset( $_POST['cspvr_clear_reports'] ) ) {
 		check_admin_referer( 'cspvr_clear_reports' );
 		global $wpdb;
-		$wpdb->query( 'TRUNCATE TABLE ' . cspvr_table_name() ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
-		wp_safe_redirect( add_query_arg( array( 'page' => 'csp-violation-reporter', 'cspvr_cleared' => '1' ), admin_url( 'tools.php' ) ) );
+		$wpdb->query( $wpdb->prepare( 'TRUNCATE TABLE %i', cspvr_table_name() ) );
+		cspvr_bump_reports_cache();
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'          => 'csp-violation-reporter',
+					'cspvr_cleared' => '1',
+				),
+				admin_url( 'tools.php' )
+			)
+		);
 		exit;
 	}
 }
@@ -294,17 +335,38 @@ function cspvr_render_admin_page() {
 	global $wpdb;
 
 	$table_name = cspvr_table_name();
-	$paged      = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
+	$paged      = 1;
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only pagination parameter.
+	if ( isset( $_GET['paged'] ) ) {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only pagination parameter.
+		$paged = max( 1, absint( wp_unslash( $_GET['paged'] ) ) );
+	}
+
 	$per_page   = 20;
 	$offset     = ( $paged - 1 ) * $per_page;
-	$total      = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table_name}" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-	$reports    = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table_name} ORDER BY created_at_gmt DESC, id DESC LIMIT %d OFFSET %d", $per_page, $offset ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+	$cache_salt = cspvr_get_reports_cache_last_changed();
+	$total_key  = 'total_' . $cache_salt;
+	$list_key   = 'list_' . md5( $per_page . ':' . $offset . ':' . $cache_salt );
+	$total      = wp_cache_get( $total_key, CSPVR_CACHE_GROUP );
+	$reports    = wp_cache_get( $list_key, CSPVR_CACHE_GROUP );
+
+	if ( false === $total ) {
+		$total = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM %i', $table_name ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Reports are read from the plugin's custom table.
+		wp_cache_set( $total_key, $total, CSPVR_CACHE_GROUP, MINUTE_IN_SECONDS );
+	}
+
+	if ( false === $reports ) {
+		$reports = $wpdb->get_results( $wpdb->prepare( 'SELECT * FROM %i ORDER BY created_at_gmt DESC, id DESC LIMIT %d OFFSET %d', $table_name, $per_page, $offset ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Reports are read from the plugin's custom table.
+		wp_cache_set( $list_key, $reports, CSPVR_CACHE_GROUP, MINUTE_IN_SECONDS );
+	}
+
 	$endpoint   = rest_url( CSPVR_REST_NAMESPACE . CSPVR_REST_ROUTE );
 	$total_page = max( 1, (int) ceil( $total / $per_page ) );
 	?>
 	<div class="wrap">
 		<h1><?php esc_html_e( 'CSP Violations', 'csp-violation-reporter' ); ?></h1>
 
+		<?php // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only success notice after a nonce-protected redirect. ?>
 		<?php if ( isset( $_GET['cspvr_cleared'] ) ) : ?>
 			<div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'CSP violation reports cleared.', 'csp-violation-reporter' ); ?></p></div>
 		<?php endif; ?>
